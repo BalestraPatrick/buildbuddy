@@ -2589,11 +2589,20 @@ func TestFirecrackerHTTPEcho(t *testing.T) {
 	port := testport.FindFree(t)
 	defaultIP, err := networking.DefaultIP(ctx)
 	require.NoError(t, err)
+	log.CtxInfof(ctx, "defaultIP %s", defaultIP)
 	hostAddr := fmt.Sprintf("%s:%d", defaultIP, port)
 	srv := &http.Server{
 		Addr: hostAddr,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "Hello from host!")
+			handlerDefaultIP, err := networking.DefaultIP(r.Context())
+			if err != nil {
+				errMsg := fmt.Sprintf("Error getting default IP: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(errMsg))
+				return
+			}
+			log.CtxInfof(ctx, "%s %s", handlerDefaultIP, r.URL)
+			w.Write([]byte(fmt.Sprintf("Hello from host at %s!", handlerDefaultIP)))
 		}),
 	}
 	go func() {
@@ -2629,6 +2638,6 @@ func TestFirecrackerHTTPEcho(t *testing.T) {
 	res := c.Run(ctx, cmd, opts.ActionWorkingDirectory, oci.Credentials{})
 	require.NoError(t, res.Error)
 	require.Equal(t, 0, res.ExitCode)
-	require.Equal(t, "Hello from host!", string(res.Stdout))
+	require.Equal(t, fmt.Sprintf("Hello from host at %s!", defaultIP), string(res.Stdout))
 	require.Empty(t, string(res.Stderr))
 }
