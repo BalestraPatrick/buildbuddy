@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,6 +43,7 @@ import (
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testfs"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testmetrics"
 	"github.com/buildbuddy-io/buildbuddy/server/testutil/testnetworking"
+	"github.com/buildbuddy-io/buildbuddy/server/testutil/testport"
 	"github.com/buildbuddy-io/buildbuddy/server/util/disk"
 	"github.com/buildbuddy-io/buildbuddy/server/util/log"
 	"github.com/buildbuddy-io/buildbuddy/server/util/networking"
@@ -2576,4 +2578,57 @@ func assertCommandResult(t testing.TB, expected *interfaces.CommandResult, actua
 	actual.AuxiliaryLogs = nil
 	actual.VMMetadata = nil
 	assert.Equal(t, expected, actual)
+}
+
+func TestFirecrackerHTTPEcho(t *testing.T) {
+	ctx := context.Background()
+	env := getTestEnv(ctx, t, envOpts{})
+	rootDir := testfs.MakeTempDir(t)
+	workDir := testfs.MakeDirAll(t, rootDir, "work")
+
+	port := testport.FindFree(t)
+	defaultIP, err := networking.DefaultIP(ctx)
+	require.NoError(t, err)
+	hostAddr := fmt.Sprintf("%s:%d", defaultIP, port)
+	srv := &http.Server{
+		Addr: hostAddr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "Hello from host!")
+		}),
+	}
+	go func() {
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			t.Logf("HTTP server error: %v", err)
+		}
+	}()
+	defer srv.Shutdown(ctx)
+
+	time.Sleep(100 * time.Millisecond)
+
+	cmd := &repb.Command{
+		Arguments: []string{"sh", "-c", fmt.Sprintf(`
+			wget -q -O - "http://%s:%d"
+		`, defaultIP, port)},
+	}
+
+	opts := firecracker.ContainerOpts{
+		ContainerImage:         busyboxImage,
+		ActionWorkingDirectory: workDir,
+		VMConfiguration: &fcpb.VMConfiguration{
+			NumCpus:           1,
+			MemSizeMb:         minMemSizeMB,
+			EnableNetworking:  true,
+			ScratchDiskSizeMb: 100,
+		},
+		ExecutorConfig: getExecutorConfig(t),
+	}
+
+	c, err := firecracker.NewContainer(ctx, env, &repb.ExecutionTask{}, opts)
+	require.NoError(t, err)
+
+	res := c.Run(ctx, cmd, opts.ActionWorkingDirectory, oci.Credentials{})
+	require.NoError(t, res.Error)
+	require.Equal(t, 0, res.ExitCode)
+	require.Equal(t, "Hello from host!", string(res.Stdout))
+	require.Empty(t, string(res.Stderr))
 }
